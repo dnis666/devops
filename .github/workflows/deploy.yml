@@ -12,16 +12,12 @@ permissions:
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-  ECS_CLUSTER_NAME: ${{ vars.ECS_CLUSTER_NAME }}
-  ECS_BACKEND_SERVICE_NAME: ${{ vars.ECS_BACKEND_SERVICE_NAME }}
-  ECS_FRONTEND_SERVICE_NAME: ${{ vars.ECS_FRONTEND_SERVICE_NAME }}
   ECR_BACKEND_REPOSITORY: ${{ vars.ECR_BACKEND_REPOSITORY }}
   ECR_FRONTEND_REPOSITORY: ${{ vars.ECR_FRONTEND_REPOSITORY }}
-  ALB_PUBLIC_URL: ${{ vars.ALB_PUBLIC_URL }}
 
 jobs:
   deploy:
-    name: Build, push, and deploy
+    name: Build and push Docker images
     runs-on: ubuntu-latest
 
     steps:
@@ -38,7 +34,6 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push images
-        id: images
         shell: bash
         run: |
           set -euo pipefail
@@ -67,101 +62,3 @@ jobs:
 
           docker push "${FRONTEND_IMAGE}"
           docker push "${REGISTRY}/${ECR_FRONTEND_REPOSITORY}:latest"
-
-          echo "backend_image=${BACKEND_IMAGE}" >> "${GITHUB_OUTPUT}"
-          echo "frontend_image=${FRONTEND_IMAGE}" >> "${GITHUB_OUTPUT}"
-
-      - name: Register new ECS task definitions
-        id: task-definitions
-        shell: bash
-        env:
-          BACKEND_IMAGE: ${{ steps.images.outputs.backend_image }}
-          FRONTEND_IMAGE: ${{ steps.images.outputs.frontend_image }}
-        run: |
-          set -euo pipefail
-
-          render_task_definition() {
-            local service_name="$1"
-            local container_name="$2"
-            local image="$3"
-            local output_name="$4"
-
-            local current_task_definition
-            current_task_definition="$(aws ecs describe-services \
-              --cluster "${ECS_CLUSTER_NAME}" \
-              --services "${service_name}" \
-              --query 'services[0].taskDefinition' \
-              --output text)"
-
-            aws ecs describe-task-definition \
-              --task-definition "${current_task_definition}" \
-              --query taskDefinition > "${output_name}.json"
-
-            jq \
-              --arg container_name "${container_name}" \
-              --arg image "${image}" \
-              'del(
-                .taskDefinitionArn,
-                .revision,
-                .status,
-                .requiresAttributes,
-                .compatibilities,
-                .registeredAt,
-                .registeredBy
-              )
-              | .containerDefinitions = (
-                  .containerDefinitions
-                  | map(
-                      if .name == $container_name
-                      then .image = $image
-                      else .
-                      end
-                    )
-                )' \
-              "${output_name}.json" > "${output_name}-rendered.json"
-
-            aws ecs register-task-definition \
-              --cli-input-json "file://${output_name}-rendered.json" \
-              --query 'taskDefinition.taskDefinitionArn' \
-              --output text
-          }
-
-          BACKEND_TASK_DEFINITION="$(render_task_definition "${ECS_BACKEND_SERVICE_NAME}" backend "${BACKEND_IMAGE}" backend-task-definition)"
-          FRONTEND_TASK_DEFINITION="$(render_task_definition "${ECS_FRONTEND_SERVICE_NAME}" frontend "${FRONTEND_IMAGE}" frontend-task-definition)"
-
-          echo "backend_task_definition=${BACKEND_TASK_DEFINITION}" >> "${GITHUB_OUTPUT}"
-          echo "frontend_task_definition=${FRONTEND_TASK_DEFINITION}" >> "${GITHUB_OUTPUT}"
-
-      - name: Deploy backend service
-        run: |
-          aws ecs update-service \
-            --cluster "${ECS_CLUSTER_NAME}" \
-            --service "${ECS_BACKEND_SERVICE_NAME}" \
-            --task-definition "${{ steps.task-definitions.outputs.backend_task_definition }}"
-
-      - name: Deploy frontend service
-        run: |
-          aws ecs update-service \
-            --cluster "${ECS_CLUSTER_NAME}" \
-            --service "${ECS_FRONTEND_SERVICE_NAME}" \
-            --task-definition "${{ steps.task-definitions.outputs.frontend_task_definition }}"
-
-      - name: Wait for ECS services
-        run: |
-          aws ecs wait services-stable \
-            --cluster "${ECS_CLUSTER_NAME}" \
-            --services "${ECS_BACKEND_SERVICE_NAME}" "${ECS_FRONTEND_SERVICE_NAME}"
-
-      - name: Check public endpoints
-        run: |
-          BASE_URL="${ALB_PUBLIC_URL%/}"
-
-          curl --retry 12 \
-            --retry-delay 10 \
-            --retry-all-errors \
-            -fsS "${BASE_URL}/"
-
-          curl --retry 12 \
-            --retry-delay 10 \
-            --retry-all-errors \
-            -fsS "${BASE_URL}/api/health"
