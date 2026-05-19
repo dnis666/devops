@@ -32,7 +32,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -49,15 +49,22 @@ jobs:
           BACKEND_IMAGE="${REGISTRY}/${ECR_BACKEND_REPOSITORY}:${IMAGE_TAG}"
           FRONTEND_IMAGE="${REGISTRY}/${ECR_FRONTEND_REPOSITORY}:${IMAGE_TAG}"
 
-          docker build -f docker/backend.Dockerfile -t "${BACKEND_IMAGE}" -t "${REGISTRY}/${ECR_BACKEND_REPOSITORY}:latest" .
+          docker build \
+            -f docker/backend.Dockerfile \
+            -t "${BACKEND_IMAGE}" \
+            -t "${REGISTRY}/${ECR_BACKEND_REPOSITORY}:latest" \
+            .
+
           docker build \
             -f docker/frontend.Dockerfile \
             --build-arg NEXT_PUBLIC_API_BASE_URL=/api \
             -t "${FRONTEND_IMAGE}" \
-            -t "${REGISTRY}/${ECR_FRONTEND_REPOSITORY}:latest" .
+            -t "${REGISTRY}/${ECR_FRONTEND_REPOSITORY}:latest" \
+            .
 
           docker push "${BACKEND_IMAGE}"
           docker push "${REGISTRY}/${ECR_BACKEND_REPOSITORY}:latest"
+
           docker push "${FRONTEND_IMAGE}"
           docker push "${REGISTRY}/${ECR_FRONTEND_REPOSITORY}:latest"
 
@@ -102,7 +109,15 @@ jobs:
                 .registeredAt,
                 .registeredBy
               )
-              | .containerDefinitions = (.containerDefinitions | map(if .name == $container_name then .image = $image else . end))' \
+              | .containerDefinitions = (
+                  .containerDefinitions
+                  | map(
+                      if .name == $container_name
+                      then .image = $image
+                      else .
+                      end
+                    )
+                )' \
               "${output_name}.json" > "${output_name}-rendered.json"
 
             aws ecs register-task-definition \
@@ -140,5 +155,13 @@ jobs:
       - name: Check public endpoints
         run: |
           BASE_URL="${ALB_PUBLIC_URL%/}"
-          curl --retry 12 --retry-delay 10 --retry-all-errors -fsS "${BASE_URL}/"
-          curl --retry 12 --retry-delay 10 --retry-all-errors -fsS "${BASE_URL}/api/health"
+
+          curl --retry 12 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            -fsS "${BASE_URL}/"
+
+          curl --retry 12 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            -fsS "${BASE_URL}/api/health"
